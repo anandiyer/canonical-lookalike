@@ -19,8 +19,9 @@
     <!-- Shared canonical.cc stylesheet: carries the global header, footer,
          nav-dropdown and layout utilities so this lab matches the site exactly. -->
     <link rel="stylesheet" href="https://canonical.cc/css/style.css?v=20260515" />
-    <!-- Lab-specific styles load after, so they win on any overlap. -->
-    <link rel="stylesheet" href="style.css" />
+    <!-- Lab-specific styles load after, so they win on any overlap.
+         ?v= busts Cloudflare's edge cache on each release — bump on changes. -->
+    <link rel="stylesheet" href="style.css?v=20260520" />
   </head>
   <body>
     <!-- Shared canonical.cc header (verbatim markup + global stylesheet classes). -->
@@ -169,6 +170,6 @@
         });
       })();
     </script>
-    <script src="app.js"></script>
+    <script src="app.js?v=20260520"></script>
   </body>
 </html>
