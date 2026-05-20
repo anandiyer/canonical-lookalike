@@ -1,0 +1,18 @@
+# dependencies / build
+node_modules/
+dist/
+
+# local dev secrets — NEVER commit (.dev.vars.example IS committed, as a template)
+.dev.vars
+.env
+.env.*
+*.local
+
+# wrangler local state (contains the local KV store + cached vars)
+.wrangler/
+
+# os / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

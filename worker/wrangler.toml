@@ -1,0 +1,22 @@
+name = "lookalike"
+main = "src/worker.js"
+compatibility_date = "2025-05-01"
+
+# Restrict to the production origin once deployed (comma-separate for multiple).
+# Use "*" only while testing.
+[vars]
+ALLOWED_ORIGIN = "https://canonical.cc"
+DAILY_LIMIT = "3"
+# Hybrid models, both served via OpenRouter. Swap to any OpenRouter model slug.
+#   CHEAP  → structuring (web) + query-gen   (e.g. deepseek/deepseek-chat)
+#   STRONG → trait extraction + scoring      (e.g. google/gemini-2.5-pro, openai/gpt-5)
+MODEL_CHEAP = "google/gemini-2.5-flash"
+MODEL_STRONG = "anthropic/claude-sonnet-4.5"
+
+# KV namespace for per-IP daily rate limiting.
+# `wrangler dev` simulates KV locally, so the dummy id below is fine for testing.
+# BEFORE `wrangler deploy`: run  `wrangler kv namespace create RL`  and paste the
+# real id here (otherwise the deployed Worker can't rate-limit).
+[[kv_namespaces]]
+binding = "RL"
+id = "00000000000000000000000000000000"

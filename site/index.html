@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Canonical Lookalike Finder · Find people with similar career DNA</title>
+    <meta
+      name="description"
+      content="Paste a LinkedIn URL or X handle and find 3–4 people with similar career DNA — same trajectory, same archetype, not just the same job title. A Canonical Labs tool."
+    />
+    <meta property="og:title" content="Canonical Lookalike Finder" />
+    <meta property="og:description" content="Find people with similar career DNA. By Canonical." />
+    <meta property="og:type" content="website" />
+    <link rel="preconnect" href="https://db.onlinewebfonts.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://db.onlinewebfonts.com/c/8f2a9d487bbbc60974cd132fc3a63862?family=Aeonik+Regular"
+    />
+    <!-- Shared canonical.cc stylesheet: carries the global header, footer,
+         nav-dropdown and layout utilities so this lab matches the site exactly. -->
+    <link rel="stylesheet" href="https://canonical.cc/css/style.css?v=20260515" />
+    <!-- Lab-specific styles load after, so they win on any overlap. -->
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Shared canonical.cc header (verbatim markup + global stylesheet classes). -->
+    <header id="header" class="fixed top-0 w-full bg-transparent z-50 transition-all duration-200">
+      <div class="container mx-auto px-8 py-8">
+        <div class="flex items-center justify-between">
+          <a href="https://canonical.cc/" class="logo-link">
+            <img src="https://canonical.cc/images/logo-rectangle-trans-short.svg" alt="Canonical" class="h-8 w-auto" />
+          </a>
+          <nav class="hidden md:flex items-center space-x-10">
+            <a href="https://canonical.cc/#about" class="nav-link">ABOUT</a>
+            <a href="https://canonical.cc/#thesis" class="nav-link">THESIS</a>
+            <a href="https://canonical.cc/portfolio" class="nav-link">PORTFOLIO</a>
+            <div class="nav-dropdown">
+              <a href="https://canonical.cc/#labs" class="nav-link nav-dropdown-toggle" aria-haspopup="true" aria-expanded="false">LABS</a>
+              <div class="nav-dropdown-menu" role="menu">
+                <a href="https://canonical.cc/labs/dilutionlab/" class="nav-dropdown-item" role="menuitem">Dilution Lab</a>
+                <a href="https://canonical.cc/labs/fundmodeler/" class="nav-dropdown-item" role="menuitem">Fund Modeler</a>
+                <a href="https://canonical.cc/labs/power-law/" class="nav-dropdown-item" role="menuitem">Power Law Lab</a>
+                <a href="https://canonical.cc/labs/lookalike/" class="nav-dropdown-item" role="menuitem">Lookalike Finder</a>
+                <a href="https://canonical.cc/physical-ai-robotics/" class="nav-dropdown-item" role="menuitem">Physical AI &amp; Robotics</a>
+                <a href="https://canonical.cc/labs/semiconductor-silicon-stack/" class="nav-dropdown-item" role="menuitem">Semiconductor Stack</a>
+              </div>
+            </div>
+            <a href="https://canonical.cc/#team" class="nav-link">TEAM</a>
+          </nav>
+          <button class="nav-menu-toggle md:hidden" type="button" id="navToggle" aria-label="Toggle navigation menu" aria-expanded="false" aria-controls="nav-mobile">
+            <span></span><span></span><span></span>
+          </button>
+        </div>
+        <nav class="nav-mobile" id="nav-mobile" hidden>
+          <a href="https://canonical.cc/#about" class="nav-link">ABOUT</a>
+          <a href="https://canonical.cc/#thesis" class="nav-link">THESIS</a>
+          <a href="https://canonical.cc/portfolio" class="nav-link">PORTFOLIO</a>
+          <a href="https://canonical.cc/#labs" class="nav-link">LABS</a>
+          <a href="https://canonical.cc/#team" class="nav-link">TEAM</a>
+        </nav>
+      </div>
+    </header>
+
+    <header class="hero">
+      <p class="eyebrow">CANONICAL LABS · LOOKALIKE FINDER</p>
+      <h1>Lookalike Finder</h1>
+      <p>
+        Paste a LinkedIn URL or X handle. Get back 3–4 people with the same career
+        DNA — trajectory, archetype, rare skill combinations — not just the same job title.
+      </p>
+    </header>
+
+    <section class="search">
+      <div class="search-row">
+        <input
+          id="input"
+          type="text"
+          placeholder="https://www.linkedin.com/in/…  or  @handle"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button class="btn" id="go"><span class="btn-spinner"></span><span id="go-label">Find Lookalikes →</span></button>
+      </div>
+      <div class="search-hint">
+        <span>Career-arc matching across the open web — powered by Claude + Exa.</span>
+        <span class="quota" id="quota"></span>
+      </div>
+    </section>
+
+    <!-- run stage -->
+    <section class="stage is-hidden" id="stage">
+      <div class="stepper" id="stepper"></div>
+      <div class="run-status" id="run-status">
+        <span class="spinner" id="spinner"></span>
+        <span class="status-text" id="status"></span>
+      </div>
+
+      <div class="card source-card is-hidden" id="source">
+        <div class="source-head">
+          <div>
+            <h2 class="source-name" id="src-name"></h2>
+            <p class="source-sub" id="src-sub"></p>
+          </div>
+          <div class="links" id="src-links"></div>
+        </div>
+        <p class="label">Career arc</p>
+        <p class="arc" id="src-arc"></p>
+        <p class="label">Defining traits</p>
+        <div class="chips" id="src-traits"></div>
+        <div class="fb" id="src-fb"></div>
+      </div>
+
+      <div class="is-hidden" id="results-wrap">
+        <h2 class="results-title">Closest career-DNA matches</h2>
+        <div class="results" id="results"></div>
+      </div>
+    </section>
+
+    <!-- notices (errors / rate limit) -->
+    <div class="notice is-hidden" id="notice"></div>
+
+    <!-- methodology -->
+    <section class="method">
+      <h2>How it works</h2>
+      <p class="method-sub">The same pipeline a human researcher runs — turned into an algorithm.</p>
+      <div class="method-steps">
+        <div class="method-step"><span class="method-num">01</span><div>
+          <h3>Profile ingestion</h3>
+          <p>Reconstruct the full profile from the open web — education, every role, the company's actual product.</p></div></div>
+        <div class="method-step"><span class="method-num">02</span><div>
+          <h3>Trait extraction</h3>
+          <p>Distil 5–8 <em>defining</em> dimensions — career arc, domain pivots, rare skill combos — each weighted by how distinctive it is.</p></div></div>
+        <div class="method-step"><span class="method-num">03</span><div>
+          <h3>Query generation</h3>
+          <p>Turn the trait vector into multiple neural search queries. You can't find a lookalike with one search — you search across trait combinations.</p></div></div>
+        <div class="method-step"><span class="method-num">04</span><div>
+          <h3>Candidate retrieval</h3>
+          <p>Exa neural search surfaces people by career <em>meaning</em>, not keywords, then results are merged and de-duplicated.</p></div></div>
+        <div class="method-step"><span class="method-num">05</span><div>
+          <h3>Scoring &amp; ranking</h3>
+          <p>Each candidate is scored on every trait axis (0–1), weighted, and ranked. The top 3–4 come back with a note on what matches — and what doesn't.</p></div></div>
+      </div>
+    </section>
+
+    <!-- Shared canonical.cc footer (verbatim markup + global stylesheet classes). -->
+    <footer class="footer">
+      <div class="container mx-auto px-8">
+        <div class="flex flex-col md:flex-row justify-between items-center">
+          <p class="footer-text">&copy; 2025 Canonical. All rights reserved.</p>
+          <div class="flex items-center space-x-6 mt-4 md:mt-0">
+            <a href="https://x.com/canonicalcc" target="_blank" rel="noopener noreferrer" class="footer-link">Canonical on X</a>
+            <a href="https://blog.canonical.cc" target="_blank" rel="noopener noreferrer" class="footer-link">Canonical on Substack</a>
+          </div>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      // Minimal mobile-nav toggle (the shared site script is home-page-specific).
+      (function () {
+        var t = document.getElementById("navToggle"),
+          m = document.getElementById("nav-mobile");
+        if (!t || !m) return;
+        t.addEventListener("click", function () {
+          var open = m.hasAttribute("hidden");
+          if (open) m.removeAttribute("hidden");
+          else m.setAttribute("hidden", "");
+          t.setAttribute("aria-expanded", String(open));
+        });
+      })();
+    </script>
+    <script src="app.js"></script>
+  </body>
+</html>

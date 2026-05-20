@@ -1,0 +1,11 @@
+# Copy this file to `.dev.vars` and fill in your real keys for local `wrangler dev`.
+#   cp .dev.vars.example .dev.vars
+# `.dev.vars` is gitignored and must NEVER be committed. In production these are
+# set with `wrangler secret put OPENROUTER_API_KEY` / `... EXA_API_KEY`.
+
+OPENROUTER_API_KEY="sk-or-REPLACE-ME"
+EXA_API_KEY="REPLACE-ME"
+
+# Dev-only conveniences (override wrangler.toml [vars] locally):
+ALLOWED_ORIGIN="*"
+DAILY_LIMIT="1000"
