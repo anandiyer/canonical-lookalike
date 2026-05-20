@@ -14,9 +14,8 @@ MODEL_CHEAP = "google/gemini-2.5-flash"
 MODEL_STRONG = "anthropic/claude-sonnet-4.5"
 
 # KV namespace for per-IP daily rate limiting.
-# `wrangler dev` simulates KV locally, so the dummy id below is fine for testing.
-# BEFORE `wrangler deploy`: run  `wrangler kv namespace create RL`  and paste the
-# real id here (otherwise the deployed Worker can't rate-limit).
+# (Forking this repo? Create your own with `wrangler kv namespace create RL`
+#  and replace the id below. `wrangler dev` simulates KV locally regardless.)
 [[kv_namespaces]]
 binding = "RL"
-id = "00000000000000000000000000000000"
+id = "7625f67e400449e4ae7340cdf1f6927e"
