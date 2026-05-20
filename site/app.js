@@ -11,7 +11,7 @@ const ENDPOINT =
   new URLSearchParams(location.search).get("api") ||
   (LOCAL_HOSTS.includes(location.hostname)
     ? "http://localhost:8787"
-    : "https://lookalike.ai-29d.workers.dev");
+    : "https://labs-api.canonical.cc");
 
 const STEPS = [
   ["ingest", "Reconstructing profile"],

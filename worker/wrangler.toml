@@ -1,6 +1,15 @@
 name = "lookalike"
 main = "src/worker.js"
 compatibility_date = "2025-05-01"
+# Keep the *.workers.dev URL alive as a fallback alongside the custom domain.
+workers_dev = true
+
+# Custom domain on the canonical.cc zone (avoids *.workers.dev, which ad-blockers
+# and DNS filters often block). wrangler provisions the DNS record + TLS cert.
+# Reusable across labs — each lab Worker can claim its own path/subdomain.
+[[routes]]
+pattern = "labs-api.canonical.cc"
+custom_domain = true
 
 # Restrict to the production origin once deployed (comma-separate for multiple).
 # Use "*" only while testing.
