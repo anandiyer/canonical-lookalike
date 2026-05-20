@@ -256,15 +256,32 @@ async function handleFeedback(request, env, cors) {
     { expirationTtl: 60 * 60 * 24 * 120 } // keep 120 days
   );
   if (env.FEEDBACK_WEBHOOK) {
+    // Slack incoming webhooks need a {text|blocks} payload; everything else
+    // (Make/Zapier/etc.) accepts the raw record.
+    const isSlack = env.FEEDBACK_WEBHOOK.includes("hooks.slack.com");
+    const payload = isSlack ? slackMessage(record) : record;
     try {
       await fetch(env.FEEDBACK_WEBHOOK, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(record),
+        body: JSON.stringify(payload),
       });
     } catch { /* non-fatal */ }
   }
   return json({ ok: true }, 200, cors);
+}
+
+// Format a feedback record as a Slack mrkdwn message.
+function slackMessage(r) {
+  return {
+    text: [
+      ":mag: *New Lookalike Finder feedback*",
+      `*On:* ${r.target || "—"}`,
+      `*Searched:* \`${r.input || "—"}\``,
+      `*Comment:* ${r.comment}`,
+      `_${r.ts} · IP ${r.ip}_`,
+    ].join("\n"),
+  };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
