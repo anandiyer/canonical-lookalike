@@ -5,7 +5,7 @@ compatibility_date = "2025-05-01"
 # Restrict to the production origin once deployed (comma-separate for multiple).
 # Use "*" only while testing.
 [vars]
-ALLOWED_ORIGIN = "https://canonical.cc"
+ALLOWED_ORIGIN = "https://canonical.cc,https://www.canonical.cc"
 DAILY_LIMIT = "3"
 # Hybrid models, both served via OpenRouter. Swap to any OpenRouter model slug.
 #   CHEAP  → structuring (web) + query-gen   (e.g. deepseek/deepseek-chat)
