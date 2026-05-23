@@ -264,8 +264,9 @@ a:hover { color: #ffffff; }
 /* source profile summary */
 .source-card { margin-bottom: 1.75rem; }
 .source-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-.source-name { font-size: 1.4rem; font-weight: 600; color: var(--card-ink); margin: 0; }
-.source-sub { color: var(--card-muted); font-size: 0.9rem; margin: 0.15rem 0 0; }
+.source-head > div:first-child { min-width: 0; flex: 1 1 12rem; }
+.source-name { font-size: 1.4rem; font-weight: 600; color: var(--card-ink); margin: 0; overflow-wrap: anywhere; }
+.source-sub { color: var(--card-muted); font-size: 0.9rem; margin: 0.15rem 0 0; overflow-wrap: anywhere; }
 .label {
   font-size: 0.68rem; letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--card-faint); margin: 1.25rem 0 0.6rem;
@@ -277,10 +278,21 @@ a:hover { color: #ffffff; }
   border-radius: 999px;
   padding: 0.3rem 0.75rem;
   font-size: 0.8rem;
+  line-height: 1.4;
   color: var(--card-soft-ink);
+  /* trait text can be long ("founder who built real-time data infra after a
+     hardware engineering and crypto background") — let the chip multi-line
+     into a stadium shape instead of clipping/overflowing the card. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .chip .w { color: var(--card-accent); font-variant-numeric: tabular-nums; margin-left: 0.35rem; font-size: 0.72rem; font-weight: 600; }
-.arc { margin: 0.4rem 0 0; color: var(--card-soft-ink); font-size: 0.92rem; }
+.arc {
+  margin: 0.4rem 0 0;
+  color: var(--card-soft-ink);
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
 
 /* profile / match link buttons (LinkedIn · X · source) */
 .links { display: flex; flex-wrap: wrap; gap: 0.45rem; }
@@ -349,8 +361,10 @@ a:hover { color: #ffffff; }
   padding: 0.2rem 0.6rem; margin-bottom: -0.2rem;
 }
 .match-head { display: flex; align-items: center; justify-content: space-between; gap: 0.85rem; }
-.match-name { font-size: 1.2rem; font-weight: 600; color: var(--card-ink); margin: 0; }
-.match-role { color: var(--card-muted); font-size: 0.85rem; margin: 0.1rem 0 0; }
+.match-head > div:first-child { min-width: 0; flex: 1; }   /* let long names wrap instead of pushing the score ring off-screen */
+.match-name { font-size: 1.2rem; font-weight: 600; color: var(--card-ink); margin: 0; overflow-wrap: anywhere; }
+.match-role { color: var(--card-muted); font-size: 0.85rem; margin: 0.1rem 0 0; overflow-wrap: anywhere; }
+.match-arc, .match-note { overflow-wrap: anywhere; }
 
 /* circular score gauge */
 .score { position: relative; width: 58px; height: 58px; flex-shrink: 0; }
@@ -552,8 +566,62 @@ a:hover { color: #ffffff; }
    inherited canonical header relies on (class="hidden md:flex"). */
 .is-hidden { display: none !important; }
 
-@media (max-width: 560px) {
+/* ── mobile ──────────────────────────────────────────────────────────── */
+/* Two stops:
+   • ≤640px — most phones in portrait. Tighten paddings, stack the rows that
+     would otherwise truncate or push content off-screen.
+   • ≤400px — narrow phones / large text. Drop a few more sizes. */
+@media (max-width: 640px) {
   .search-row { flex-direction: column; }
-  .nav { padding-top: 1.25rem; }
-  .hero { padding-top: 3.5rem; }
+  .hero { padding-top: 6.5rem; padding-left: 1.25rem; padding-right: 1.25rem; }
+  .search { padding: 0 1.25rem; }
+  .stage { padding: 0 1rem; }
+  .method { padding: 0 1.25rem; }
+
+  /* Cards get a touch less padding so chips/arcs/match content has room. */
+  .card { padding: 1.25rem; border-radius: 0.7rem; }
+
+  /* Single-column match grid — minmax(300px, 1fr) was forcing horizontal
+     scroll on narrow screens. */
+  .results { grid-template-columns: 1fr; gap: 1.1rem; }
+
+  /* Stepper sits more compactly so it fits without a second row wrapping
+     mid-label. */
+  .stepper { gap: 0.4rem 0.85rem; }
+  .step { font-size: 0.78rem; }
+  .step .dot { width: 22px; height: 22px; font-size: 0.7rem; }
+
+  /* Hint row stacks so the quota count doesn't fight the description text. */
+  .search-hint { flex-direction: column; gap: 0.25rem; }
+
+  /* Anchor-warning banner: stack the message above a full-width refine button. */
+  .anchor-warning { flex-direction: column; align-items: stretch; gap: 0.7rem; }
+  .anchor-warning-btn { align-self: flex-start; }
+
+  /* Source-card bottom row: feedback affordance + 'wrong person?' stack
+     instead of competing for the same line. */
+  .source-actions { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+
+  /* Match-head: name+role on one line stacked above the score ring rather
+     than fighting it for width. */
+  .match-head { flex-wrap: wrap; }
+
+  /* Modal: trim padding so the form fits comfortably with the on-screen
+     keyboard open. */
+  .modal-overlay { padding: 0.75rem; }
+  .modal-card { padding: 1.4rem 1.4rem 1.25rem; border-radius: 0.7rem; }
+  .modal-card h2 { font-size: 1.1rem; }
+
+  /* Methodology cards — same treatment as the main card padding. */
+  .method-step { padding: 0.9rem 1rem; }
+}
+
+@media (max-width: 400px) {
+  .hero { padding-top: 5.5rem; }
+  .hero h1 { font-size: 2.2rem; }
+  .hero p { font-size: 1rem; }
+  .card { padding: 1rem; }
+  .source-name { font-size: 1.2rem; }
+  .match-name { font-size: 1.1rem; }
+  .score, .score svg { width: 50px; height: 50px; }
 }
