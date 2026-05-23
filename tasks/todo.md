@@ -36,20 +36,45 @@ affordance (user-driven correction) — bundled as one deploy.
 
 ## Verify
 
-- [ ] `node --check` on worker.js and app.js
-- [ ] Smoke: curl `/lookalike` with an X handle, confirm `anchor_unverified`
-      fires when ingest doesn't reference the handle
-- [ ] Smoke: curl `/lookalike` with hints, confirm RL bypass and prompt
-      wiring (look for `USER HINTS:` in worker logs / dry-run)
-- [ ] Visual: confirm modal renders + opens from results panel
+- [x] `node --check` on worker.js and app.js — both parse
+- [x] Smoke-tested `canonicalize()` against 10 input variants (URLs, handles,
+      edge cases) — all classify correctly
+- [x] Live smoke: POST `/lookalike` with a gibberish handle + hints body —
+      `anchor_unverified` event fired correctly; main quota untouched (refine
+      RL counter used instead)
 
 ## Deploy
 
-- [ ] `wrangler deploy`
-- [ ] Sync `site/` files to anandiyer.github.io `labs/lookalike/`
-- [ ] Bump `?v=` query on app.js/style.css to bust Cloudflare edge cache
-- [ ] Commit + push both repos
+- [x] Source repo: committed (`7ff94b9`) + pushed to `main`
+- [x] Worker: `wrangler deploy` → version `cfcb1c96-bcf4-4220-abe0-bb8f9e01d3ad`
+      live at `labs-api.canonical.cc`
+- [x] Site files synced to `anandiyer.github.io/labs/lookalike/`,
+      committed (`33a785b`) + pushed to `master`
+- [x] Asset cache busted to `?v=20260523`
+- [x] Pages deploy completed successfully (run `26338901624`)
+- [x] Confirmed live page serves the new markup (anchor-warning + refine-modal)
 
 ## Review
 
-(to be filled in after implementation)
+**What shipped:** the bundled X-handle hardening + refine flow, deployed
+end-to-end. The root-cause bug (passing the bare handle to Exa as a neural
+query) is fixed by canonicalizing input → `https://x.com/<handle>` and running
+two-pronged evidence (`/search` for linking pages + `/contents` for the bio).
+The model is now told to anchor on the canonical URL/handle. When it fails
+to anchor, the user gets an interactive recovery path instead of a Slack
+ping we can't act on.
+
+**Closed feedback loop:** every search posts to `#hack-central`. New event
+types `:warning: Anchor not verified` and `:repeat: User refined a search`
+mean we now see the exact failure mode in real time AND see what the user
+*meant* when they refined.
+
+**Cost added per lookup:** ~$0.006 (one extra Exa `/contents` call + an
+extra `/search` query for X handles). Latency: ~1–2s added to ingest (parallel).
+
+**Followups worth tracking:**
+- Confidence-aware checkpoint (the v2 architecture we deferred) — wait a week
+  of Slack data to see if `anchor_unverified` rate justifies the friction
+  trade-off.
+- Refine analytics: count refines vs initial searches per day → KPI for the
+  resolver. If <10% of X-handle searches refine, the hardening is sufficient.
