@@ -150,8 +150,8 @@ async function runPipeline({ input, hints, env, ctx, send, remaining, ip, day })
       `"education":[{"school":"","degree":"","field":"","source":""}],` +
       `"career_history":[{"company":"","role":"","domain":"","source":""}],` +
       `"background_signals":[""],` +
-      `"linkedin":"full LinkedIn URL if it appears in the evidence else empty",` +
-      `"x":"full X/Twitter URL if it appears in the evidence else empty",` +
+      `"linkedin":"full LinkedIn URL — ALWAYS echo the URL from the ANCHOR(S) above if one was a LinkedIn URL; otherwise the LinkedIn URL from the evidence if any, else empty",` +
+      `"x":"full X/Twitter URL — ALWAYS echo the URL from the ANCHOR(S) above if one was an X/Twitter URL or handle; otherwise the X URL from the evidence if any, else empty",` +
       `"arc":"3-4 sentence narrative grounded only in the evidence above"}`,
   });
   send({ type: "stage", step: "ingest", state: "done" });
@@ -370,23 +370,44 @@ async function gatherEvidence(env, anchors) {
   return merged;
 }
 
-// Did the reconstructed profile reference the anchor we asked for? If zero of
-// the profile's URL fields (linkedin, x, every source URL) contain ANY of the
-// anchor tokens, the model picked up cross-talk evidence about a different
-// person — we couldn't actually find the handle.
+// Did the reconstructed profile actually represent the person the user asked
+// about? We treat this as innocent-until-proven-guilty:
+//   (a) FAIL if the model returned a URL of the SAME kind as the anchor but
+//       pointing to a DIFFERENT handle/slug — that's positive evidence of
+//       wrong-person.
+//   (b) FAIL if the result is essentially empty (no name + no career) for an
+//       X-handle input — strong signal the handle couldn't be resolved at all.
+//   (c) Otherwise PASS. Most LinkedIn inputs can never satisfy a positive
+//       check because LinkedIn is auth-walled (Exa returns no LinkedIn URLs
+//       in evidence), so requiring positive proof produces false positives
+//       on every successful LinkedIn lookup.
 function verifyAnchor(profile, anchors) {
-  const tokens = anchors.flatMap((a) => a.tokens).filter(Boolean);
-  if (!tokens.length) return true;  // nothing to check against
-  const fields = [
-    profile.linkedin,
-    profile.x,
-    ...(profile.career_history || []).map((c) => c?.source),
-    ...(profile.education || []).map((e) => e?.source),
-  ]
-    .filter(Boolean)
-    .map((s) => String(s).toLowerCase());
-  if (!fields.length) return false;  // model returned no source URLs at all
-  return fields.some((f) => tokens.some((t) => f.includes(t)));
+  const primary = anchors[0];
+  if (!primary || primary.kind === "unknown") return true;
+
+  // (a) contradicting URL of the same kind
+  for (const a of anchors) {
+    if (a.kind === "linkedin" && profile.linkedin) {
+      const p = String(profile.linkedin).toLowerCase();
+      if (!p.includes(`linkedin.com/in/${a.handle}`)) return false;
+    }
+    if (a.kind === "x" && profile.x) {
+      const p = String(profile.x).toLowerCase();
+      const h = a.handle.toLowerCase();
+      if (!p.includes(`/${h}`) && !p.includes(`@${h}`)) return false;
+    }
+  }
+
+  // (b) total resolution failure for X-handle inputs. (LinkedIn can be thin
+  // for low-footprint people and still be the right person — don't trip on
+  // sparseness alone.)
+  if (primary.kind === "x") {
+    const hasName = !!(profile.name || "").trim();
+    const hasCareer = (profile.career_history || []).some((c) => c?.company);
+    if (!hasName && !hasCareer) return false;
+  }
+
+  return true;
 }
 
 // Coerce + clamp user-provided refine hints. Returns null if nothing usable.

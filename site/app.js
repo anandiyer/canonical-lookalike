@@ -47,6 +47,10 @@ let lastHints = null;
 // AbortController for the in-flight SSE — lets the refine flow cancel the
 // current bad run cleanly when the user submits hints mid-pipeline.
 let inflight = null;
+// We only auto-open the refine modal once per search session. If the user
+// dismissed it (or already refined once), repeated anchor_unverified events
+// only show the warning banner — the modal popping back open is hostile UX.
+let modalAutoOpened = false;
 
 function buildStepper() {
   const wrap = $("stepper");
@@ -239,10 +243,14 @@ function handleEvent(ev) {
       break;
     case "anchor_unverified":
       // The worker couldn't confirm the reconstructed profile matches the
-      // input. Surface a warning banner and auto-open the refine modal so the
-      // user can correct it without waiting for the (probably-wrong) results.
+      // input. Surface a warning banner. Auto-open the refine modal ONLY the
+      // first time per session — after that the user knows where the refine
+      // affordance is, and re-popping the modal is hostile.
       showAnchorWarning(ev.reason);
-      openRefineModal({ auto: true });
+      if (!modalAutoOpened) {
+        modalAutoOpened = true;
+        openRefineModal({ auto: true });
+      }
       break;
     case "error":
       $("spinner").style.display = "none";
@@ -269,6 +277,10 @@ async function run(input, hints) {
   lastInput = input.trim();
   lastHints = hints || null;
   inflight = new AbortController();
+  // Fresh search (no hints) resets the auto-open guard so the modal can pop
+  // again for a new input. Refines keep the guard set — once the user has
+  // seen the modal for this input, don't slam it back in their face.
+  if (!hints) modalAutoOpened = false;
 
   const go = $("go");
   go.disabled = true;
