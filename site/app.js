@@ -51,6 +51,12 @@ let inflight = null;
 // dismissed it (or already refined once), repeated anchor_unverified events
 // only show the warning banner — the modal popping back open is hostile UX.
 let modalAutoOpened = false;
+// Set when the user submits the refine modal — they've actively acknowledged
+// the warning and we're retrying for them, so subsequent anchor_unverified
+// events during the refined run should NOT re-show the banner. Cleared only
+// on a brand-new search (so a different bad input can warn again).
+// Dismissing via X / Cancel / Esc does NOT set this — the warning stays.
+let anchorWarningSuppressed = false;
 
 function buildStepper() {
   const wrap = $("stepper");
@@ -261,6 +267,9 @@ function handleEvent(ev) {
 }
 
 function showAnchorWarning(msg) {
+  // Suppressed once the user has submitted hints — they're actively trying to
+  // correct it and don't need the warning replayed during the retry.
+  if (anchorWarningSuppressed) return;
   const el = $("anchor-warning");
   if (msg) $("anchor-warning-msg").textContent = msg;
   el.classList.remove("is-hidden");
@@ -277,10 +286,14 @@ async function run(input, hints) {
   lastInput = input.trim();
   lastHints = hints || null;
   inflight = new AbortController();
-  // Fresh search (no hints) resets the auto-open guard so the modal can pop
-  // again for a new input. Refines keep the guard set — once the user has
-  // seen the modal for this input, don't slam it back in their face.
-  if (!hints) modalAutoOpened = false;
+  // Fresh search (no hints) resets the session guards so a new input can
+  // re-warn / re-pop the modal. Refines keep them set — once the user has
+  // seen the modal for this input and acted on it, the banner shouldn't
+  // come back while we retry for them.
+  if (!hints) {
+    modalAutoOpened = false;
+    anchorWarningSuppressed = false;
+  }
 
   const go = $("go");
   go.disabled = true;
@@ -398,6 +411,12 @@ $("refine-form").addEventListener("submit", (e) => {
     first?.focus();
     return;
   }
+  // User actively acknowledged the warning by giving us hints. Clear the
+  // banner now and suppress it for the rest of this refine session — the
+  // retry might re-fire anchor_unverified, and we don't want the same
+  // dismissed warning to reappear during their fix-up attempt.
+  hideAnchorWarning();
+  anchorWarningSuppressed = true;
   closeRefineModal();
   // Allow the next run() to proceed even though `running` is still true from
   // the in-flight one — run() itself aborts the in-flight reader.
