@@ -139,7 +139,33 @@ input, IP, and remaining daily quota). By default it reuses the existing
 `FEEDBACK_WEBHOOK` (which posts to `#hack-central`), so no extra setup is needed.
 Set a separate `SEARCH_WEBHOOK` secret only if you want searches in a different
 channel. It's fire-and-forget — if the webhook is unset or fails, the lookup is
-unaffected.
+unaffected. Three Slack event types fire to the same channel:
+- `:mag_right:` *New Lookalike search* — initial searches
+- `:warning:` *Anchor not verified* — the reconstructed profile didn't reference
+  the input handle/URL (i.e. we likely picked the wrong person — see below)
+- `:repeat:` *User refined a search* — user clicked "Wrong person?" and resubmitted
+  with structured hints; includes the hints
+
+**X-handle hardening + refine flow.** An X handle alone is ambiguous: bare tokens
+don't search well, and many real people share names. The ingest step defends
+against this in three layers:
+
+1. **Canonicalize the input** up front (`@handle` → `https://x.com/<handle>`).
+2. **Two-pronged Exa evidence:** in parallel, `/search` neural over the
+   canonical URL (finds pages that *link to* the profile — Crunchbase, podcast
+   guest pages, news) AND `/contents` on the URL itself (extracts the X bio /
+   LinkedIn headline directly). Together these give the model real grounding.
+3. **Anchor verification:** after ingest, the worker checks whether the
+   reconstructed profile actually references the input handle/URL (via the
+   model's `source` fields and the `linkedin`/`x` URLs). If not, it emits
+   `anchor_unverified` over the SSE stream — the page auto-opens a refine
+   modal asking for any name / employer / "known for" / URL the user can give
+   us. Submitting re-runs the search with those hints as highest-priority
+   ground truth.
+
+Refines bypass the main daily quota but are capped separately at 3/IP/day
+(`rl:refine:<ip>:<day>` in KV), so a user can always recover from a wrong
+match even when their main quota is spent.
 
 Any [OpenRouter model slug](https://openrouter.ai/models) works for either tier
 — e.g. `deepseek/deepseek-chat` (cheaper), `google/gemini-2.5-pro` or

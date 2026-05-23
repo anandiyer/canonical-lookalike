@@ -14,11 +14,16 @@
 */
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const EXA_URL = "https://api.exa.ai/search";
+const EXA_SEARCH_URL = "https://api.exa.ai/search";
+const EXA_CONTENTS_URL = "https://api.exa.ai/contents";
 // OpenRouter web plugin for the ingestion step (replaces Claude's built-in
 // web_search). More results = more grounding evidence, so the model fills fewer
 // fields from parametric memory (the source of "proximity" hallucinations).
 const WEB_PLUGIN = { id: "web", max_results: 8 };
+// Refine requests (anything with a `hints` body) bypass the daily limit but are
+// capped separately to prevent abuse. One refine = one corrected search; three
+// per IP per day is plenty.
+const REFINE_LIMIT = 3;
 
 export default {
   async fetch(request, env, ctx) {
@@ -32,31 +37,47 @@ export default {
     if (url.pathname === "/feedback") return handleFeedback(request, env, cors);
     if (url.pathname !== "/lookalike") return json({ error: "not found" }, 404, cors);
 
-    // ── rate limit: N lookups per IP per UTC day ────────────────────────
-    const limit = parseInt(env.DAILY_LIMIT || "3", 10);
-    const ip = request.headers.get("CF-Connecting-IP") || "anon";
-    const day = new Date().toISOString().slice(0, 10);
-    const rlKey = `rl:${ip}:${day}`;
-    const used = parseInt((await env.RL.get(rlKey)) || "0", 10);
-    if (used >= limit)
-      return json(
-        { error: "rate_limited", resetHint: "your quota resets at midnight UTC" },
-        429,
-        cors
-      );
-
     let body;
     try { body = await request.json(); } catch { return json({ error: "bad json" }, 400, cors); }
     const input = (body.input || "").trim();
     if (!input) return json({ error: "missing input" }, 400, cors);
+    const hints = sanitizeHints(body.hints);
+    const isRefine = !!hints;
 
-    // count this lookup up front (prevents abuse via aborted requests)
+    // ── rate limit ──────────────────────────────────────────────────────
+    // Initial searches: N/IP/day (the public quota).
+    // Refine requests (a follow-up with user hints to correct a bad result):
+    // separate counter, capped at 3/IP/day so the user can always recover from
+    // a wrong-person result even when their main quota is spent.
+    const limit = parseInt(env.DAILY_LIMIT || "3", 10);
+    const ip = request.headers.get("CF-Connecting-IP") || "anon";
+    const day = new Date().toISOString().slice(0, 10);
+    const rlKey = isRefine ? `rl:refine:${ip}:${day}` : `rl:${ip}:${day}`;
+    const rlCap = isRefine ? REFINE_LIMIT : limit;
+    const used = parseInt((await env.RL.get(rlKey)) || "0", 10);
+    if (used >= rlCap)
+      return json(
+        {
+          error: "rate_limited",
+          resetHint: isRefine
+            ? "you've used your refine attempts for today — quota resets at midnight UTC"
+            : "your quota resets at midnight UTC",
+        },
+        429,
+        cors
+      );
+
+    // count this lookup up front (prevents abuse via aborted requests). For
+    // refines the main quota is untouched — `remaining` still reflects it.
     await env.RL.put(rlKey, String(used + 1), { expirationTtl: 60 * 60 * 36 });
-    const remaining = Math.max(0, limit - (used + 1));
+    const mainUsed = isRefine
+      ? parseInt((await env.RL.get(`rl:${ip}:${day}`)) || "0", 10)
+      : used + 1;
+    const remaining = Math.max(0, limit - mainUsed);
 
     // analytics: forward every search to Slack (#hack-central). Fire-and-forget
     // via waitUntil so it never delays or breaks the pipeline.
-    notifySearch(env, ctx, { input, ip, day, remaining });
+    notifySearch(env, ctx, { input, ip, day, remaining, hints, isRefine });
 
     // ── stream the pipeline ─────────────────────────────────────────────
     const { readable, writable } = new TransformStream();
@@ -64,7 +85,7 @@ export default {
     const enc = new TextEncoder();
     const send = (obj) => writer.write(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
 
-    runPipeline({ input, env, send, remaining })
+    runPipeline({ input, hints, env, ctx, send, remaining, ip, day })
       .catch((err) => send({ type: "error", message: String(err.message || err) }))
       .finally(() => writer.close());
 
@@ -75,7 +96,7 @@ export default {
 };
 
 // ── pipeline ───────────────────────────────────────────────────────────────
-async function runPipeline({ input, env, send, remaining }) {
+async function runPipeline({ input, hints, env, ctx, send, remaining, ip, day }) {
   send({ type: "quota", remaining });
   // Hybrid: cheap model for mechanical steps, strong model for reasoning.
   const CHEAP = env.MODEL_CHEAP || "google/gemini-2.5-flash";
@@ -85,13 +106,26 @@ async function runPipeline({ input, env, send, remaining }) {
   // 1 — ingest + structure profile  (CHEAP + web plugin + Exa grounding)
   send({ type: "stage", step: "ingest", state: "active" });
   send({ type: "status", text: "Reading the open web to reconstruct the profile…" });
-  const target = describeTarget(input);
-  // Pull concrete source snippets up front so the model has real evidence to
-  // ground on (and cite) rather than filling underdetermined fields from
-  // parametric memory — the source of "proximity" hallucinations.
-  const sourceEvidence = (await exaSearch(env, input).catch(() => []))
-    .slice(0, 8)
-    .map((r) => ({ title: r.title, url: r.url, text: (r.text || "").slice(0, 500) }));
+
+  // Identify the verified anchor(s) the user gave us — the canonical URL/handle
+  // we will ground every fact against. For X handles this is the single biggest
+  // defense against picking the wrong person: instead of shipping a bare token
+  // to Exa, we ship the canonical x.com/<handle> URL and fetch its contents.
+  const anchors = [canonicalize(input)];
+  if (hints?.url) {
+    const ha = canonicalize(hints.url);
+    if (ha.kind !== "unknown") anchors.push(ha);
+  }
+  const primary = anchors[0];
+
+  // Two-pronged Exa evidence gathering:
+  //   (a) /search neural over each anchor URL → pages that LINK TO the profile
+  //       (podcast guests, Crunchbase, news, conference bios — the disambiguators)
+  //   (b) /contents on the anchor URLs → the X/LinkedIn page text itself (bio,
+  //       headline) which usually carries real name + employer.
+  // Running these in parallel adds <2s and produces dramatically better grounding.
+  const evidence = await gatherEvidence(env, anchors);
+
   const profile = await llmJSON(env, {
     model: CHEAP,
     web: true,
@@ -100,12 +134,17 @@ async function runPipeline({ input, env, send, remaining }) {
     notify,
     system:
       "You are a meticulous people-research analyst. Reconstruct a professional profile ONLY from the web results and the SOURCE EVIDENCE provided (personal site, company pages, podcasts, conference bios, Crunchbase, news). LinkedIn itself is usually auth-walled — reconstruct from everything around it. " +
-      "STRICT GROUNDING RULES: (1) Assert only facts directly supported by the evidence. (2) If a field is not supported, leave it empty (\"\") or an empty array — do NOT fill gaps from prior knowledge or plausible guesses. (3) Never introduce a company, school, role, title, date, or location that does not appear in the evidence. (4) For each career_history and education entry, set \"source\" to the URL it came from. " +
+      "ANCHOR: the user identified this person via the ANCHOR(S) listed below — these are the verified canonical identifier(s). Only use evidence that explicitly references one of these anchors (the same handle, the same URL, or a page that links to one of them). If a snippet mentions a different person who happens to share a name but does NOT reference the anchor, IGNORE it. " +
+      (hints ? "USER HINTS: the user explicitly told us who this person is. Hints OVERRIDE any ambiguous web signal — trust them as ground truth and use them to disambiguate. " : "") +
+      "STRICT GROUNDING RULES: (1) Assert only facts directly supported by the evidence (or the user hints). (2) If a field is not supported, leave it empty (\"\") or an empty array — do NOT fill gaps from prior knowledge or plausible guesses. (3) Never introduce a company, school, role, title, date, or location that does not appear in the evidence or hints. (4) For each career_history and education entry, set \"source\" to the URL it came from. " +
       "Return ONLY a JSON object, no prose.",
     prompt:
-      `Reconstruct the professional profile for this person: ${target}\n\n` +
+      `Reconstruct the professional profile for this person.\n\n` +
+      `ANCHOR(S) (verified identifier(s) — every fact must be consistent with these):\n` +
+      `${anchors.map((a) => `  • ${a.anchor}${a.url ? ` → ${a.url}` : ""}`).join("\n")}\n\n` +
+      (hints ? `USER HINTS (highest priority — overrides any conflicting web signal):\n${JSON.stringify(hints)}\n\n` : "") +
       `SOURCE EVIDENCE (web snippets — treat as ground truth; do not contradict it or go beyond it):\n` +
-      `${JSON.stringify(sourceEvidence)}\n\n` +
+      `${JSON.stringify(evidence)}\n\n` +
       `Return JSON with this exact shape:\n` +
       `{"name":"","current_role":"","current_company":"","company_description":"","location":"",` +
       `"education":[{"school":"","degree":"","field":"","source":""}],` +
@@ -116,6 +155,19 @@ async function runPipeline({ input, env, send, remaining }) {
       `"arc":"3-4 sentence narrative grounded only in the evidence above"}`,
   });
   send({ type: "stage", step: "ingest", state: "done" });
+
+  // Anchor verification: did the reconstructed profile actually reference the
+  // anchor we asked it to? If not, the model picked up cross-talk evidence about
+  // a different person. Flag it so the UI can auto-open the refine modal and so
+  // the Slack analytics show us the exact failure pattern in real time.
+  if (!verifyAnchor(profile, anchors)) {
+    send({
+      type: "anchor_unverified",
+      anchor: primary.anchor,
+      reason: "The reconstructed profile does not reference the handle/URL you provided. We may have picked up the wrong person.",
+    });
+    notifyAnchorMiss(env, ctx, { input, anchor: primary.anchor, ip, day, profile });
+  }
 
   // 2 — trait extraction  (STRONG — the key reasoning step)
   send({ type: "stage", step: "traits", state: "active" });
@@ -145,8 +197,8 @@ async function runPipeline({ input, env, send, remaining }) {
       current_company: profile.current_company,
       location: profile.location,
       arc: profile.arc || profile.company_description,
-      linkedin: profile.linkedin || sourceLink(input, "linkedin"),
-      x: profile.x || sourceLink(input, "x"),
+      linkedin: profile.linkedin || anchorURL(anchors, "linkedin"),
+      x: profile.x || anchorURL(anchors, "x"),
       traits,
     },
   });
@@ -225,25 +277,127 @@ async function runPipeline({ input, env, send, remaining }) {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
-function describeTarget(input) {
-  if (/linkedin\.com\/in\//i.test(input)) {
-    const slug = input.replace(/\/+$/, "").split("/in/")[1]?.split(/[/?]/)[0] || input;
-    return `the person at LinkedIn URL ${input} (handle/slug "${slug}")`;
+
+// Turn whatever the user typed into a verified canonical anchor. The `anchor`
+// string is the canonical identifier shown to the model and used by
+// verifyAnchor() to detect when the model grounded on the wrong person. The
+// `tokens` array is the lowercase fragments we look for in profile URLs to
+// confirm the right person came back.
+function canonicalize(input) {
+  const v = String(input || "").trim();
+  if (!v) return { kind: "unknown", url: "", handle: "", anchor: "", tokens: [] };
+
+  // LinkedIn profile URL
+  const li = v.match(/linkedin\.com\/in\/([^/?#\s]+)/i);
+  if (li) {
+    const slug = li[1].toLowerCase();
+    return {
+      kind: "linkedin",
+      url: v.startsWith("http") ? v : `https://www.linkedin.com/in/${slug}/`,
+      handle: slug,
+      anchor: `linkedin.com/in/${slug}`,
+      tokens: [`linkedin.com/in/${slug}`],
+    };
   }
-  if (/^@?\w+$/.test(input)) return `the person with X/Twitter handle ${input.replace(/^@?/, "@")}`;
-  if (/(twitter|x)\.com\//i.test(input)) return `the person at this X/Twitter profile: ${input}`;
-  return input;
+
+  // X/Twitter URL — normalize to x.com
+  const xUrl = v.match(/(?:twitter|x)\.com\/(?:#!\/)?(@?\w{1,30})/i);
+  if (xUrl) {
+    const handle = xUrl[1].replace(/^@/, "").toLowerCase();
+    return {
+      kind: "x",
+      url: `https://x.com/${handle}`,
+      handle,
+      anchor: `@${handle}`,
+      tokens: [`x.com/${handle}`, `twitter.com/${handle}`, `@${handle}`, handle],
+    };
+  }
+
+  // Bare or @-prefixed X handle. X handles are 1-15 chars, alphanumeric + _.
+  // We require at least 3 chars so common English words don't get misclassified.
+  if (/^@?\w{3,15}$/.test(v)) {
+    const handle = v.replace(/^@/, "").toLowerCase();
+    return {
+      kind: "x",
+      url: `https://x.com/${handle}`,
+      handle,
+      anchor: `@${handle}`,
+      tokens: [`x.com/${handle}`, `twitter.com/${handle}`, `@${handle}`, handle],
+    };
+  }
+
+  return { kind: "unknown", url: "", handle: "", anchor: v, tokens: [v.toLowerCase()] };
 }
 
-// Best-effort source profile link derived from whatever the user typed.
-function sourceLink(input, kind) {
-  const v = (input || "").trim();
-  if (kind === "linkedin") return /linkedin\.com\/in\//i.test(v) ? v : "";
-  if (kind === "x") {
-    if (/(twitter|x)\.com\//i.test(v)) return v;
-    if (/^@?\w{1,30}$/.test(v)) return `https://x.com/${v.replace(/^@/, "")}`;
+// Pull the URL for a given kind out of the anchor list (used to fall back when
+// the model didn't return a LinkedIn/X URL even though we know one exists).
+function anchorURL(anchors, kind) {
+  const hit = anchors.find((a) => a.kind === kind);
+  return hit?.url || "";
+}
+
+// Two-pronged Exa evidence gathering. /search finds pages that LINK TO each
+// anchor URL (podcast guests, Crunchbase, news, conference bios — the pages
+// that disambiguate WHICH person owns this handle). /contents extracts the
+// anchor pages themselves (X bio, LinkedIn headline). Together they give the
+// model enough signal to correctly identify a person from just an X handle.
+async function gatherEvidence(env, anchors) {
+  const urls = anchors.map((a) => a.url).filter(Boolean);
+  // For X handles, two complementary query phrasings ("url form" finds linking
+  // pages; "quoted handle" finds tweets/mentions) maximize disambiguators.
+  const searchQueries = anchors.flatMap((a) =>
+    a.kind === "x"
+      ? [a.url, `"@${a.handle}" twitter profile background`]
+      : a.url ? [a.url] : []
+  );
+
+  const [contents, ...searches] = await Promise.all([
+    urls.length ? exaContents(env, urls).catch(() => []) : Promise.resolve([]),
+    ...searchQueries.map((q) => exaSearch(env, q).catch(() => [])),
+  ]);
+
+  // Merge: anchor-page contents first (highest signal), then search results.
+  // Dedup by URL. Cap text length so we don't blow ingest token budget.
+  const seen = new Set();
+  const merged = [];
+  for (const r of [...contents, ...searches.flat()]) {
+    const key = (r.url || r.title || "").toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ title: r.title, url: r.url, text: (r.text || "").slice(0, 500) });
+    if (merged.length >= 10) break;
   }
-  return "";
+  return merged;
+}
+
+// Did the reconstructed profile reference the anchor we asked for? If zero of
+// the profile's URL fields (linkedin, x, every source URL) contain ANY of the
+// anchor tokens, the model picked up cross-talk evidence about a different
+// person — we couldn't actually find the handle.
+function verifyAnchor(profile, anchors) {
+  const tokens = anchors.flatMap((a) => a.tokens).filter(Boolean);
+  if (!tokens.length) return true;  // nothing to check against
+  const fields = [
+    profile.linkedin,
+    profile.x,
+    ...(profile.career_history || []).map((c) => c?.source),
+    ...(profile.education || []).map((e) => e?.source),
+  ]
+    .filter(Boolean)
+    .map((s) => String(s).toLowerCase());
+  if (!fields.length) return false;  // model returned no source URLs at all
+  return fields.some((f) => tokens.some((t) => f.includes(t)));
+}
+
+// Coerce + clamp user-provided refine hints. Returns null if nothing usable.
+function sanitizeHints(h) {
+  if (!h || typeof h !== "object") return null;
+  const out = {};
+  for (const key of ["full_name", "employer", "known_for", "url"]) {
+    const v = String(h[key] || "").trim().slice(0, 200);
+    if (v) out[key] = v;
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 // POST /feedback — store quality feedback durably in KV (+ optional webhook).
@@ -293,16 +447,38 @@ async function handleFeedback(request, env, cors) {
 // existing FEEDBACK_WEBHOOK (both go to #hack-central); set SEARCH_WEBHOOK only
 // to split them. A no-op if neither is set. Runs in the background via
 // waitUntil so it never blocks or breaks the response.
-function notifySearch(env, ctx, { input, ip, day, remaining }) {
+function notifySearch(env, ctx, { input, ip, day, remaining, hints, isRefine }) {
   const webhook = env.SEARCH_WEBHOOK || env.FEEDBACK_WEBHOOK;
   if (!webhook) return;
-  const payload = {
+  const lines = [
+    isRefine ? ":repeat: *User refined a search*" : ":mag_right: *New Lookalike search*",
+    `*Searched:* \`${String(input).slice(0, 300)}\``,
+  ];
+  if (hints) lines.push(`*Hints:* \`${JSON.stringify(hints).slice(0, 400)}\``);
+  lines.push(`_${new Date().toISOString()} · IP ${ip} · ${remaining} left today_`);
+  postWebhook(ctx, webhook, { text: lines.join("\n") });
+}
+
+// Fire when the reconstructed profile didn't reference the anchor. Lets us see
+// exactly which inputs the resolver is failing on — closes the feedback loop
+// in real time without waiting for the user to submit anything.
+function notifyAnchorMiss(env, ctx, { input, anchor, ip, day, profile }) {
+  const webhook = env.SEARCH_WEBHOOK || env.FEEDBACK_WEBHOOK;
+  if (!webhook) return;
+  postWebhook(ctx, webhook, {
     text: [
-      ":mag_right: *New Lookalike search*",
+      ":warning: *Anchor not verified*",
       `*Searched:* \`${String(input).slice(0, 300)}\``,
-      `_${new Date().toISOString()} · IP ${ip} · ${remaining} left today_`,
+      `*Expected anchor:* \`${anchor}\``,
+      `*Model returned:* \`${String(profile?.name || "—").slice(0, 120)}\` ${profile?.linkedin ? `(${profile.linkedin})` : ""} ${profile?.x ? `(${profile.x})` : ""}`.trim(),
+      `_${new Date().toISOString()} · IP ${ip}_`,
     ].join("\n"),
-  };
+  });
+}
+
+// Fire-and-forget Slack/webhook POST via ctx.waitUntil so it never blocks the
+// pipeline. Shared by all notify* helpers.
+function postWebhook(ctx, webhook, payload) {
   const post = fetch(webhook, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -373,7 +549,7 @@ async function llmJSON(env, { model, max_tokens, system, prompt, web, notify, te
 }
 
 async function exaSearch(env, query) {
-  const res = await fetch(EXA_URL, {
+  const res = await fetch(EXA_SEARCH_URL, {
     method: "POST",
     headers: { "x-api-key": env.EXA_API_KEY, "content-type": "application/json" },
     body: JSON.stringify({
@@ -381,6 +557,23 @@ async function exaSearch(env, query) {
       type: "auto",
       numResults: 6,
       contents: { text: { maxCharacters: 500 } },
+    }),
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.results || [];
+}
+
+// Fetch the page text behind one or more URLs (Exa scrapes + extracts). Used
+// to pull the X profile bio or LinkedIn headline directly during ingest — the
+// single highest-signal piece of evidence for confirming who the user meant.
+async function exaContents(env, urls) {
+  const res = await fetch(EXA_CONTENTS_URL, {
+    method: "POST",
+    headers: { "x-api-key": env.EXA_API_KEY, "content-type": "application/json" },
+    body: JSON.stringify({
+      urls,
+      text: { maxCharacters: 1200 },
     }),
   });
   if (!res.ok) return [];

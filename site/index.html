@@ -34,7 +34,7 @@
     <link rel="stylesheet" href="https://canonical.cc/css/style.css?v=20260515" />
     <!-- Lab-specific styles load after, so they win on any overlap.
          ?v= busts Cloudflare's edge cache on each release — bump on changes. -->
-    <link rel="stylesheet" href="style.css?v=20260520" />
+    <link rel="stylesheet" href="style.css?v=20260523" />
   </head>
   <body>
     <!-- Shared canonical.cc header (verbatim markup + global stylesheet classes). -->
@@ -112,6 +112,17 @@
         <span class="status-text" id="status"></span>
       </div>
 
+      <!-- Auto-shows when the worker flags `anchor_unverified` — i.e. we
+           couldn't confirm the reconstructed profile is actually who the user
+           meant. Acts as a hard interrupt with a CTA into the refine modal. -->
+      <div class="anchor-warning is-hidden" id="anchor-warning">
+        <div class="anchor-warning-body">
+          <b>We couldn't confirm this is the right person.</b>
+          <span id="anchor-warning-msg">The handle you gave us is ambiguous — tell us a bit more so we can find the right one.</span>
+        </div>
+        <button class="anchor-warning-btn" type="button" id="anchor-warning-refine">Refine →</button>
+      </div>
+
       <div class="card source-card is-hidden" id="source">
         <div class="source-head">
           <div>
@@ -124,7 +135,10 @@
         <p class="arc" id="src-arc"></p>
         <p class="label">Defining traits</p>
         <div class="chips" id="src-traits"></div>
-        <div class="fb" id="src-fb"></div>
+        <div class="source-actions">
+          <div class="fb" id="src-fb"></div>
+          <button class="wrong-person" type="button" id="wrong-person">Wrong person? Refine →</button>
+        </div>
       </div>
 
       <div class="is-hidden" id="results-wrap">
@@ -135,6 +149,41 @@
 
     <!-- notices (errors / rate limit) -->
     <div class="notice is-hidden" id="notice"></div>
+
+    <!-- Refine modal. Opens when the user clicks "Wrong person?" or when the
+         worker emits `anchor_unverified`. Submit → re-runs the same search
+         with structured hints that override ambiguous web signal. -->
+    <div class="modal-overlay is-hidden" id="refine-modal" role="dialog" aria-modal="true" aria-labelledby="refine-title">
+      <div class="modal-card">
+        <button class="modal-close" type="button" id="refine-close" aria-label="Close">✕</button>
+        <h2 id="refine-title">Help us find the right person</h2>
+        <p class="modal-sub">
+          The handle alone is ambiguous. Give us anything you know — even one field usually fixes it.
+        </p>
+        <form id="refine-form" novalidate>
+          <label>
+            <span>Full name</span>
+            <input name="full_name" type="text" autocomplete="off" spellcheck="false" />
+          </label>
+          <label>
+            <span>Current employer</span>
+            <input name="employer" type="text" autocomplete="off" spellcheck="false" />
+          </label>
+          <label>
+            <span>Known for / role</span>
+            <input name="known_for" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. founder of Tubi, AI researcher at OpenAI" />
+          </label>
+          <label>
+            <span>Any URL that's definitely them</span>
+            <input name="url" type="url" autocomplete="off" spellcheck="false" placeholder="LinkedIn, personal site, podcast guest page…" />
+          </label>
+          <div class="modal-actions">
+            <button type="button" class="modal-cancel" id="refine-cancel">Cancel</button>
+            <button type="submit" class="modal-submit" id="refine-submit">Retry with these hints</button>
+          </div>
+        </form>
+      </div>
+    </div>
 
     <!-- methodology -->
     <section class="method">
@@ -186,6 +235,6 @@
         });
       })();
     </script>
-    <script src="app.js?v=20260520"></script>
+    <script src="app.js?v=20260523"></script>
   </body>
 </html>

@@ -43,6 +43,10 @@ const pct = (x) => Math.round((x || 0) * 100);
 
 let running = false;
 let lastInput = "";
+let lastHints = null;
+// AbortController for the in-flight SSE — lets the refine flow cancel the
+// current bad run cleanly when the user submits hints mid-pipeline.
+let inflight = null;
 
 function buildStepper() {
   const wrap = $("stepper");
@@ -233,6 +237,13 @@ function handleEvent(ev) {
       if (ev.remaining != null)
         $("quota").textContent = `${ev.remaining} lookup${ev.remaining === 1 ? "" : "s"} left today`;
       break;
+    case "anchor_unverified":
+      // The worker couldn't confirm the reconstructed profile matches the
+      // input. Surface a warning banner and auto-open the refine modal so the
+      // user can correct it without waiting for the (probably-wrong) results.
+      showAnchorWarning(ev.reason);
+      openRefineModal({ auto: true });
+      break;
     case "error":
       $("spinner").style.display = "none";
       $("status").textContent = "";
@@ -241,21 +252,38 @@ function handleEvent(ev) {
   }
 }
 
-async function run(input) {
+function showAnchorWarning(msg) {
+  const el = $("anchor-warning");
+  if (msg) $("anchor-warning-msg").textContent = msg;
+  el.classList.remove("is-hidden");
+}
+function hideAnchorWarning() {
+  $("anchor-warning").classList.add("is-hidden");
+}
+
+async function run(input, hints) {
   if (running || !input.trim()) return;
+  // If a refine fires mid-stream, cancel the in-flight reader cleanly.
+  if (inflight) inflight.abort();
   running = true;
   lastInput = input.trim();
+  lastHints = hints || null;
+  inflight = new AbortController();
+
   const go = $("go");
   go.disabled = true;
   go.classList.add("loading");
-  $("go-label").textContent = "Finding…";
+  $("go-label").textContent = hints ? "Retrying…" : "Finding…";
   $("notice").className = "notice is-hidden";
+  hideAnchorWarning();
   $("source").classList.add("is-hidden");
   $("results-wrap").classList.add("is-hidden");
   $("stage").classList.remove("is-hidden");
   $("spinner").style.display = "";
   buildStepper();
-  $("status").textContent = "Starting — reconstructing the profile from the open web…";
+  $("status").textContent = hints
+    ? "Retrying with your hints — re-reading the open web…"
+    : "Starting — reconstructing the profile from the open web…";
   // make it obvious something is happening on Enter
   $("stage").scrollIntoView({ behavior: "smooth", block: "start" });
 
@@ -263,16 +291,19 @@ async function run(input) {
     const res = await fetch(ENDPOINT + "/lookalike", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: lastInput }),
+      body: JSON.stringify({ input: lastInput, ...(hints ? { hints } : {}) }),
+      signal: inflight.signal,
     });
 
     if (res.status === 429) {
       const body = await res.json().catch(() => ({}));
       $("stage").classList.add("is-hidden");
       showNotice(
-        `<b>Daily limit reached.</b> You've used your lookups for today${
-          body.resetHint ? " — " + esc(body.resetHint) : ""
-        }. This keeps the lab free for everyone. Come back tomorrow.`
+        `<b>${hints ? "Refine limit reached." : "Daily limit reached."}</b> ${
+          hints
+            ? "You've used your refine attempts for today."
+            : "You've used your lookups for today"
+        }${body.resetHint ? " — " + esc(body.resetHint) : ""}. This keeps the lab free for everyone. Come back tomorrow.`
       );
       return;
     }
@@ -301,19 +332,76 @@ async function run(input) {
       $("status").textContent = "";
     }
   } catch (err) {
+    // Abort = user kicked off a refine; don't show an error for that.
+    if (err.name === "AbortError") return;
     showNotice(
       `<b>Something went wrong:</b> ${esc(err.message)}. The Worker may be down or not yet configured.`,
       true
     );
   } finally {
-    running = false;
-    const go = $("go");
-    go.disabled = false;
-    go.classList.remove("loading");
-    $("go-label").textContent = "Find Lookalikes →";
-    $("spinner").style.display = "none";
+    // Only clear running state if this is still the active run (abort means a
+    // new run has already taken over and we don't want to step on its state).
+    if (!inflight || !inflight.signal.aborted) {
+      running = false;
+      const go = $("go");
+      go.disabled = false;
+      go.classList.remove("loading");
+      $("go-label").textContent = "Find Lookalikes →";
+      $("spinner").style.display = "none";
+    }
   }
 }
+
+// ── refine modal ───────────────────────────────────────────────────────
+function openRefineModal({ auto } = {}) {
+  const modal = $("refine-modal");
+  modal.classList.remove("is-hidden");
+  // Pre-fill any URL hint from the last input if it looks like one — saves
+  // the user retyping if they corrected themselves in the modal.
+  if (auto) $("refine-form").reset();
+  // Focus the first field for keyboard users.
+  setTimeout(() => modal.querySelector('input[name="full_name"]')?.focus(), 30);
+}
+function closeRefineModal() {
+  $("refine-modal").classList.add("is-hidden");
+}
+
+function readRefineForm() {
+  const form = $("refine-form");
+  const data = new FormData(form);
+  const hints = {};
+  for (const key of ["full_name", "employer", "known_for", "url"]) {
+    const v = String(data.get(key) || "").trim();
+    if (v) hints[key] = v;
+  }
+  return Object.keys(hints).length ? hints : null;
+}
+
+$("refine-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const hints = readRefineForm();
+  if (!hints) {
+    // Nothing entered — nudge the user to fill at least one field.
+    const first = $("refine-form").querySelector('input[name="full_name"]');
+    first?.focus();
+    return;
+  }
+  closeRefineModal();
+  // Allow the next run() to proceed even though `running` is still true from
+  // the in-flight one — run() itself aborts the in-flight reader.
+  running = false;
+  run(lastInput, hints);
+});
+$("refine-cancel").addEventListener("click", closeRefineModal);
+$("refine-close").addEventListener("click", closeRefineModal);
+$("refine-modal").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) closeRefineModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("refine-modal").classList.contains("is-hidden")) closeRefineModal();
+});
+$("wrong-person").addEventListener("click", () => openRefineModal({ auto: false }));
+$("anchor-warning-refine").addEventListener("click", () => openRefineModal({ auto: false }));
 
 $("go").addEventListener("click", () => run($("input").value));
 $("input").addEventListener("keydown", (e) => { if (e.key === "Enter") run($("input").value); });
