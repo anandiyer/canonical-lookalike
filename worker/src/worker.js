@@ -16,11 +16,12 @@
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const EXA_URL = "https://api.exa.ai/search";
 // OpenRouter web plugin for the ingestion step (replaces Claude's built-in
-// web_search). Few results keeps token volume — and cost — low.
-const WEB_PLUGIN = { id: "web", max_results: 3 };
+// web_search). More results = more grounding evidence, so the model fills fewer
+// fields from parametric memory (the source of "proximity" hallucinations).
+const WEB_PLUGIN = { id: "web", max_results: 8 };
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || "";
     const cors = corsHeaders(origin, env);
 
@@ -53,6 +54,10 @@ export default {
     await env.RL.put(rlKey, String(used + 1), { expirationTtl: 60 * 60 * 36 });
     const remaining = Math.max(0, limit - (used + 1));
 
+    // analytics: forward every search to Slack (#hack-central). Fire-and-forget
+    // via waitUntil so it never delays or breaks the pipeline.
+    notifySearch(env, ctx, { input, ip, day, remaining });
+
     // ── stream the pipeline ─────────────────────────────────────────────
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
@@ -77,27 +82,38 @@ async function runPipeline({ input, env, send, remaining }) {
   const STRONG = env.MODEL_STRONG || "anthropic/claude-sonnet-4.5";
   const notify = (m) => send({ type: "status", text: m });
 
-  // 1 — ingest + structure profile  (CHEAP + web plugin)
+  // 1 — ingest + structure profile  (CHEAP + web plugin + Exa grounding)
   send({ type: "stage", step: "ingest", state: "active" });
   send({ type: "status", text: "Reading the open web to reconstruct the profile…" });
   const target = describeTarget(input);
+  // Pull concrete source snippets up front so the model has real evidence to
+  // ground on (and cite) rather than filling underdetermined fields from
+  // parametric memory — the source of "proximity" hallucinations.
+  const sourceEvidence = (await exaSearch(env, input).catch(() => []))
+    .slice(0, 8)
+    .map((r) => ({ title: r.title, url: r.url, text: (r.text || "").slice(0, 500) }));
   const profile = await llmJSON(env, {
     model: CHEAP,
     web: true,
-    max_tokens: 2200,
+    temperature: 0.1,
+    max_tokens: 2400,
     notify,
     system:
-      "You are a meticulous people-research analyst. Use web results to reconstruct a person's full professional profile from public sources (personal site, company pages, podcasts, conference bios, Crunchbase, news). LinkedIn itself is usually auth-walled — reconstruct from everything around it. Capture their LinkedIn and X/Twitter profile URLs if you find them. Return ONLY a JSON object, no prose.",
+      "You are a meticulous people-research analyst. Reconstruct a professional profile ONLY from the web results and the SOURCE EVIDENCE provided (personal site, company pages, podcasts, conference bios, Crunchbase, news). LinkedIn itself is usually auth-walled — reconstruct from everything around it. " +
+      "STRICT GROUNDING RULES: (1) Assert only facts directly supported by the evidence. (2) If a field is not supported, leave it empty (\"\") or an empty array — do NOT fill gaps from prior knowledge or plausible guesses. (3) Never introduce a company, school, role, title, date, or location that does not appear in the evidence. (4) For each career_history and education entry, set \"source\" to the URL it came from. " +
+      "Return ONLY a JSON object, no prose.",
     prompt:
       `Reconstruct the professional profile for this person: ${target}\n\n` +
+      `SOURCE EVIDENCE (web snippets — treat as ground truth; do not contradict it or go beyond it):\n` +
+      `${JSON.stringify(sourceEvidence)}\n\n` +
       `Return JSON with this exact shape:\n` +
       `{"name":"","current_role":"","current_company":"","company_description":"","location":"",` +
-      `"education":[{"school":"","degree":"","field":""}],` +
-      `"career_history":[{"company":"","role":"","domain":""}],` +
+      `"education":[{"school":"","degree":"","field":"","source":""}],` +
+      `"career_history":[{"company":"","role":"","domain":"","source":""}],` +
       `"background_signals":[""],` +
-      `"linkedin":"full LinkedIn URL if known else empty",` +
-      `"x":"full X/Twitter URL if known else empty",` +
-      `"arc":"3-4 sentence narrative of their career arc"}`,
+      `"linkedin":"full LinkedIn URL if it appears in the evidence else empty",` +
+      `"x":"full X/Twitter URL if it appears in the evidence else empty",` +
+      `"arc":"3-4 sentence narrative grounded only in the evidence above"}`,
   });
   send({ type: "stage", step: "ingest", state: "done" });
 
@@ -107,9 +123,11 @@ async function runPipeline({ input, env, send, remaining }) {
   const traitsObj = await llmJSON(env, {
     model: STRONG,
     max_tokens: 1200,
+    temperature: 0.2,
     notify,
     system:
-      "You extract the DEFINING dimensions of a professional archetype — the rare, distinctive axes, not generic job attributes. Return ONLY JSON.",
+      "You extract the DEFINING dimensions of a professional archetype — the rare, distinctive axes, not generic job attributes. " +
+      "STRICT GROUNDING: derive every trait ONLY from facts present in the provided profile. Do NOT introduce any company, school, role, title, date, or specific that is not already in the profile, and never assert a career path that doesn't match the profile's career_history exactly. If the profile is thin, return fewer traits rather than inventing detail. Return ONLY JSON.",
     prompt:
       `Given this profile, extract 5–8 distinctive trait dimensions. Capture career trajectory ` +
       `patterns, domain transitions/pivots, rare skill combinations, background characteristics, and ` +
@@ -271,6 +289,28 @@ async function handleFeedback(request, env, cors) {
   return json({ ok: true }, 200, cors);
 }
 
+// Forward a search request to Slack (#hack-central) for analytics. Reuses the
+// existing FEEDBACK_WEBHOOK (both go to #hack-central); set SEARCH_WEBHOOK only
+// to split them. A no-op if neither is set. Runs in the background via
+// waitUntil so it never blocks or breaks the response.
+function notifySearch(env, ctx, { input, ip, day, remaining }) {
+  const webhook = env.SEARCH_WEBHOOK || env.FEEDBACK_WEBHOOK;
+  if (!webhook) return;
+  const payload = {
+    text: [
+      ":mag_right: *New Lookalike search*",
+      `*Searched:* \`${String(input).slice(0, 300)}\``,
+      `_${new Date().toISOString()} · IP ${ip} · ${remaining} left today_`,
+    ].join("\n"),
+  };
+  const post = fetch(webhook, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => {/* non-fatal */});
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(post);
+}
+
 // Format a feedback record as a Slack mrkdwn message.
 function slackMessage(r) {
   return {
@@ -288,7 +328,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // One LLM call via OpenRouter (OpenAI-compatible chat completions), returning
 // parsed JSON. `web: true` attaches the web plugin for the ingestion step.
-async function llmJSON(env, { model, max_tokens, system, prompt, web, notify }) {
+async function llmJSON(env, { model, max_tokens, system, prompt, web, notify, temperature }) {
   const maxAttempts = 4;
   for (let attempt = 1; ; attempt++) {
     const res = await fetch(OPENROUTER_URL, {
@@ -303,6 +343,8 @@ async function llmJSON(env, { model, max_tokens, system, prompt, web, notify }) 
       body: JSON.stringify({
         model,
         max_tokens,
+        // Low temperature on factual steps reduces creative gap-filling.
+        ...(temperature != null ? { temperature } : {}),
         messages: [
           { role: "system", content: system },
           { role: "user", content: prompt },

@@ -126,12 +126,20 @@ point elsewhere).
 | Allowed origins | `ALLOWED_ORIGIN` (comma-separated) |
 | # Exa queries / results | `queries.slice(0, 5)` and `numResults` in `worker.js` |
 | Feedback alerts | optional `FEEDBACK_WEBHOOK` secret — POSTs each submission to a Slack/Make/Zapier webhook |
+| Search analytics | every search forwarded to Slack; reuses `FEEDBACK_WEBHOOK` (`#hack-central`), or set `SEARCH_WEBHOOK` to split channels |
 
 **Feedback:** every profile (the searched person *and* each result) has a
 "Feedback" affordance. Submissions hit `POST /feedback` and are stored in KV under
 `fb:<timestamp>:<rand>` for 120 days. Set a `FEEDBACK_WEBHOOK` secret
 (`wrangler secret put FEEDBACK_WEBHOOK`) to also forward each one to a webhook.
 Read them back later with `wrangler kv key list` / `get` on the `RL` namespace.
+
+**Search analytics:** every search request is forwarded to Slack (the searched
+input, IP, and remaining daily quota). By default it reuses the existing
+`FEEDBACK_WEBHOOK` (which posts to `#hack-central`), so no extra setup is needed.
+Set a separate `SEARCH_WEBHOOK` secret only if you want searches in a different
+channel. It's fire-and-forget — if the webhook is unset or fails, the lookup is
+unaffected.
 
 Any [OpenRouter model slug](https://openrouter.ai/models) works for either tier
 — e.g. `deepseek/deepseek-chat` (cheaper), `google/gemini-2.5-pro` or

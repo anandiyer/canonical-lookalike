@@ -9,3 +9,8 @@ EXA_API_KEY="REPLACE-ME"
 # Dev-only conveniences (override wrangler.toml [vars] locally):
 ALLOWED_ORIGIN="*"
 DAILY_LIMIT="1000"
+
+# Search analytics reuse FEEDBACK_WEBHOOK by default (both go to #hack-central).
+# Set SEARCH_WEBHOOK only if you want searches in a different channel.
+# FEEDBACK_WEBHOOK="https://hooks.slack.com/services/REPLACE/ME"
+# SEARCH_WEBHOOK="https://hooks.slack.com/services/REPLACE/ME"
