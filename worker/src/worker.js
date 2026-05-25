@@ -314,8 +314,12 @@ function canonicalize(input) {
   }
 
   // Bare or @-prefixed X handle. X handles are 1-15 chars, alphanumeric + _.
-  // We require at least 3 chars so common English words don't get misclassified.
-  if (/^@?\w{3,15}$/.test(v)) {
+  // If @ is explicit, accept any valid length (1-15) — the user has declared
+  // it a handle, so trust them (e.g. @ai → x.com/ai). For bare strings we
+  // still require 3+ chars so common English words don't get misclassified.
+  const explicitAt = v.startsWith("@");
+  const handleRe = explicitAt ? /^@\w{1,15}$/ : /^\w{3,15}$/;
+  if (handleRe.test(v)) {
     const handle = v.replace(/^@/, "").toLowerCase();
     return {
       kind: "x",
